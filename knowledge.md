@@ -1,0 +1,2 @@
+Aprendizados com o projeto:
+    Compreendi como o stark bank inova o mercado, com uma solução focada no B2B, a ideia é facilitar nos diversos processos de uma empresa como pagamento de funcionarios, de fornecedores e facilitando esses processos se conectando com RDPs ja existentes nas empresas
