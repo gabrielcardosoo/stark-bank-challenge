@@ -24,10 +24,12 @@ injetar um fake e testar o handler isoladamente.
 Ponto mais crítico do desafio. Com repositório fake em memória.
 
 - [ ] **Mesmo `event.id` processado 2x** → 1 registro, 1 chamada de Transfer.
-- [ ] **Dois `event.id` diferentes para o mesmo Invoice** → o `externalId` derivado do invoice id impede a duplicata. Dedupe por evento sozinha não cobre este caso.
-- [ ] **Falha entre criar a Transfer e persistir** → fazer o repositório lançar exception depois da chamada; ao reprocessar, não pode sair uma segunda Transfer.
+- [ ] **Dois `event.id` diferentes para o mesmo Invoice** → o `external_id` derivado do invoice id impede a duplicata. Dedupe por evento sozinha não cobre este caso.
+- [ ] **`insert_pending` já existe** (outro worker reivindicou) → retorna sem chamar o Stark. É o mutex que impede a corrida.
+- [ ] **Falha entre reivindicar e chamar o Stark** → a linha fica `pending`; ao reprocessar pelo Kafka, o Worker desiste no conflito e **não** cria uma segunda Transfer.
+- [ ] **Falha entre criar a Transfer e confirmar** → linha continua `pending` mesmo com a Transfer criada no Stark; nenhuma segunda chamada acontece.
 - [ ] **Evento já marcado como processado** → no-op, responde 200.
-- [ ] **`externalId` é determinístico** — mesma entrada gera sempre o mesmo valor. É o que sustenta todos os itens acima.
+- [ ] **`external_id` é determinístico** — mesma entrada gera sempre o mesmo valor. É o que sustenta todos os itens acima.
 
 ## 3. Roteamento de eventos
 
@@ -55,5 +57,18 @@ Função pura, os testes mais baratos do projeto.
 
 - [ ] **Retry com backoff**: client falha N vezes → asserir número de tentativas e intervalos (com clock fake), e que desiste deixando o evento reprocessável.
 - [ ] **Falha do worker não vira 5xx**: o endpoint já respondeu 200; o erro fica contido no processamento.
-- [ ] **Reconciliação seleciona os certos**: dado um conjunto em memória, retorna só os invoices `credited` sem Transfer correspondente.
+- [ ] **B1 — seleciona os certos**: dado um conjunto em memória, retorna só os invoices `credited` sem linha em `transfers`.
+- [ ] **B2 — `pending` que já saiu no Stark** → marca `created`, **não** republica no Kafka.
+- [ ] **B2 — `pending` que não saiu no Stark** → libera a linha e republica.
+- [ ] **Carência respeitada**: linha `pending` de 10 segundos **não** é tratada como órfã (senão o Fallback disputa com o Worker).
 - [ ] **Reconciliação é idempotente**: rodar duas vezes seguidas não gera Transfers extras.
+
+## 7. Kafka (com producer/consumer fakes)
+
+Kafka entrega at-least-once — estes testes existem para provar que o sistema aguenta isso.
+
+- [ ] **Mesma mensagem consumida 2x** → 1 Transfer. É o mesmo cenário da seção 2, agora entrando pelo caminho do Kafka.
+- [ ] **Mensagem publicada com `key = invoice_id`** — é o que garante ordem por invoice na partição.
+- [ ] **Offset só é commitado após sucesso**: fazer o processamento lançar exception e asserir que o commit **não** aconteceu.
+- [ ] **Falha ao publicar não derruba o webhook**: producer fake lançando exception → endpoint ainda responde 200 e o evento fica persistido para a reconciliação recuperar.
+- [ ] **Mensagem malformada não trava o consumer**: payload inválido → registra/descarta e segue para a próxima, sem travar a partição.
