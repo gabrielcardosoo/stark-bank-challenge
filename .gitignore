@@ -222,3 +222,6 @@ __marimo__/
 *.pem
 *.key
 private-key*
+
+# Logs da aplicação
+logs/
