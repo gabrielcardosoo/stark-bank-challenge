@@ -21,15 +21,20 @@ class WebhookEvent(Base):
     # a primeira barreira contra reentrega
     stark_event_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
 
-    subscription: Mapped[str] = mapped_column(String(50), nullable=False)
-    log_type: Mapped[str] = mapped_column(String(50), nullable=False)
-    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    subscription: Mapped[str] = mapped_column(String(50))
+    log_type: Mapped[str] = mapped_column(String(50))
+    payload: Mapped[dict] = mapped_column(JSONB)
+
+    # id do invoice no Stark, extraído do payload. Guardado como string solta, sem FK:
+    # o evento é persistido antes de qualquer consulta, e um evento de invoice que não
+    # seja nossa não pode derrubar o webhook. Correlação se faz por join.
+    stark_invoice_id: Mapped[str | None] = mapped_column(String(64), index=True)
 
     received_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
+        DateTime(timezone=True), server_default=func.now()
     )
     processed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
+        DateTime(timezone=True)
     )
 
     def __repr__(self) -> str:

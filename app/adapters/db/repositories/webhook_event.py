@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, timezone
 
 from sqlalchemy import select, update
@@ -5,6 +6,8 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.adapters.db.models import WebhookEvent
+
+logger = logging.getLogger(__name__)
 
 
 class WebhookEventRepository:
@@ -18,13 +21,9 @@ class WebhookEventRepository:
         subscription: str,
         log_type: str,
         payload: dict,
+        stark_invoice_id: str | None = None,
     ) -> bool:
-        """Persiste o evento. Devolve False se já tinha sido recebido.
-
-        Primeira barreira contra reentrega: rejeita a duplicata antes de publicar no
-        Kafka ou acordar o Worker. Não é a garantia final — essa é o `external_id` em
-        `transfers` —, mas custa um INSERT.
-        """
+        """Persiste o evento. Devolve False se já tinha sido recebido."""
         stmt = (
             pg_insert(WebhookEvent)
             .values(
@@ -32,11 +31,25 @@ class WebhookEventRepository:
                 subscription=subscription,
                 log_type=log_type,
                 payload=payload,
+                stark_invoice_id=stark_invoice_id,
             )
             .on_conflict_do_nothing(index_elements=["stark_event_id"])
             .returning(WebhookEvent.id)
         )
-        return self._session.execute(stmt).scalar_one_or_none() is not None
+        novo = self._session.execute(stmt).scalar_one_or_none() is not None
+
+        if novo:
+            logger.info(
+                "evento persistido stark_event_id=%s log_type=%s",
+                stark_event_id,
+                log_type,
+            )
+        else:
+            logger.info(
+                "IDEMPOTÊNCIA: evento %s já recebido — reentrega ignorada",
+                stark_event_id,
+            )
+        return novo
 
     def exists(self, stark_event_id: str) -> bool:
         return (
