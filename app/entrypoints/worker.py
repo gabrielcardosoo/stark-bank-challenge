@@ -1,7 +1,8 @@
 """Consome `invoices.credited` e cria as Transfers. Processo longo, fica no ar.
 
-O offset é commitado **depois** de cada mensagem processada. Ver `ProcessCredited`
-para a distinção entre falha antes e depois de reivindicar o trabalho.
+O offset é commitado **depois** de cada mensagem, mesmo quando o processamento falha:
+a linha `pending` já está gravada e o Fallback (caso B2) resolve. Não commitar faria a
+mesma mensagem voltar para sempre e travar a partição atrás dela.
 """
 import logging
 import signal
@@ -42,30 +43,41 @@ def main() -> int:
     try:
         with CreditedInvoiceConsumer() as consumer:
             for mensagem in consumer.messages():
-                # uma transação por mensagem: um erro não contamina a próxima
-                with session_scope() as session:
-                    criou = ProcessCredited(
-                        invoices=InvoiceRepository(session),
-                        transfers=TransferRepository(session),
-                        stark=stark,
-                    ).execute(mensagem)
-
-                # só depois do commit da transação — se o processo morrer antes daqui,
-                # a mensagem volta e a idempotência absorve
+                _processar(stark, mensagem)
                 consumer.commit()
                 processadas += 1
-                if criou:
-                    logger.info(
-                        "Transfer criada para invoice %s", mensagem["stark_invoice_id"]
-                    )
+
     except KeyboardInterrupt:
         pass
+
     except Exception:
         logger.exception("worker falhou")
         return 1
 
     logger.info("worker encerrado (%d mensagens processadas)", processadas)
     return 0
+
+
+def _processar(stark, mensagem: dict) -> None:
+    """Uma sessão por mensagem; um erro não contamina a próxima."""
+    try:
+        with session_scope() as session:
+            criou = ProcessCredited(
+                invoices=InvoiceRepository(session),
+                transfers=TransferRepository(session),
+                stark=stark,
+                commit=session.commit,
+            ).execute(mensagem)
+
+        if criou:
+            logger.info("Transfer criada para invoice %s", mensagem["stark_invoice_id"])
+
+    except Exception:
+        # a reivindicação já está commitada: a linha fica `pending` e o Fallback resolve
+        logger.exception(
+            "falha ao processar invoice %s — Fallback (B2) resolve",
+            mensagem.get("stark_invoice_id"),
+        )
 
 
 if __name__ == "__main__":
