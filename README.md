@@ -321,7 +321,7 @@ O tópico da fila é criado pelo serviço `redpanda-init` do compose.
 ### Entrypoints
 
 ```bash
-# Invoice Generator — emite um lote de 8 a 12 invoices e termina
+# Invoice Generator — emite UM lote de 8 a 12 invoices e termina.
 .venv/bin/python -m app.entrypoints.issuer
 
 # Webhook — servidor HTTP, fica no ar
@@ -332,6 +332,15 @@ O tópico da fila é criado pelo serviço `redpanda-init` do compose.
 
 # Fallback — reconciliação, roda e termina
 .venv/bin/python -m app.entrypoints.reconciler
+```
+
+### Agendamento da emissão
+
+O entrypoint emite **um** lote e termina; quem repete é o serviço `issuer` do compose:
+
+```yaml
+INTERVALO_SEGUNDOS: "10800"   # 3 horas, como pede o enunciado
+restart: unless-stopped
 ```
 
 ### Expor o webhook

@@ -103,7 +103,8 @@ def test_falha_do_stark_deixa_a_linha_pending(repos):
 
 
 def test_transfer_ja_existente_no_stark_nao_cria_outra(repos):
-    """O Stark não deduplica na criação: perguntar antes evita a segunda cobrança."""
+    """Uma segunda tentativa queimaria o external_id: o Stark a recusa depois, por
+    webhook, e o identificador não aceita mais nenhuma tentativa."""
     semear_creditada(repos)
     ja_existe = type("T", (), {"id": "stark-pre-existente", "status": "success"})()
 

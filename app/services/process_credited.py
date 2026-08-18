@@ -64,9 +64,15 @@ class ProcessCredited:
     def _obter_transfer(self, external_id: str, net: int):
         """Cria a Transfer — a menos que ela já exista no Stark.
 
-        O Stark **não** deduplica por `external_id`: verificado no sandbox, duas
-        chamadas com o mesmo valor criam duas Transfers. Como a única barreira é local,
-        perguntamos antes de gastar.
+        O Stark recusa uma segunda Transfer com o mesmo `external_id`, mas a recusa é
+        **assíncrona**: a criação devolve `status=created` sem erro e a falha
+        ("Duplicated transfer") só chega segundos depois, por webhook. Ou seja, tentar
+        de novo não levanta exceção — apenas queima o `external_id`, que passa a não
+        aceitar nenhuma tentativa posterior.
+
+        Por isso perguntamos antes: se já existe uma Transfer válida, reaproveitamos em
+        vez de gastar a única chance. A busca ignora `failed` e `canceled`, senão o
+        sistema registraria como entregue algo que foi recusado.
         """
         existente = self._stark.find_transfer_by_external_id(external_id)
         if existente is not None:

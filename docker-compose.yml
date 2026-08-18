@@ -136,7 +136,8 @@ services:
       - ./logs:/app/logs
     command: python -m app.entrypoints.worker
 
-  # emite um lote e dorme. Sem cron: o laço no shell basta e mantém o entrypoint burro.
+  # Emite um lote a cada 3 horas, indefinidamente. Sem cron: o laço no shell basta e
+  # mantém o entrypoint burro — ele emite UM lote e termina.
   issuer:
     build: .
     container_name: stark-issuer
@@ -147,7 +148,7 @@ services:
     env_file: .env
     environment:
       <<: *app_env
-      INTERVALO_SEGUNDOS: "3600"
+      INTERVALO_SEGUNDOS: "10800"   # 3 horas
     volumes:
       - ./stark-keys:/app/stark-keys:ro
       - ./logs:/app/logs
