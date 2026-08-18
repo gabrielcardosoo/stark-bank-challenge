@@ -22,10 +22,16 @@ lido do evento. Em produção a taxa não é zero, e um atalho aqui esconderia o
 
 **Decisão:** 1:1 — uma Transfer para cada Invoice creditado.
 
-O id do Invoice vira o `external_id` da Transfer, e essa derivação determinística é o que
-impede pagamento em dobro. A agregação economizaria taxas, mas exigiria controle de janela
-e tornaria a conciliação difícil de provar — com 1:1, `SUM(transfers) == SUM(credited)`
-fecha linha a linha.
+O id do Invoice vira o `external_id` da Transfer — no formato `transfer-{invoiceId}` —, e
+essa derivação determinística é o que impede pagamento em dobro.
+
+O prefixo importa: **`invoice-{id}` não funciona.** O Stark já usa essa string
+internamente para o lançamento do crédito, e uma Transfer com o mesmo `external_id` é
+recusada com *"Duplicated transfer"*. Isolado em teste — `invoice-{id}` falha, e
+`transfer-{id}` com o mesmo valor e destino tem sucesso.
+
+A agregação economizaria taxas, mas exigiria controle de janela e tornaria a conciliação
+difícil de provar — com 1:1, `SUM(transfers) == SUM(credited)` fecha linha a linha.
 
 ### 3. Postgres como sistema de registro
 
@@ -100,9 +106,12 @@ quem impede a segunda transferência é o `external_id` da decisão 3, não a fi
 do `due`, a janela total é de **7 horas**.
 
 O ciclo curto faz cada invoice se resolver muito antes do fim das 24h, e o estado final do
-banco fica conclusivo. Vencimento em 1 hora também provoca multa e juros nas pagas em
-atraso, exercitando o caminho em que `credited_amount != nominal_amount`. O sandbox paga
-em ~8 minutos, então a janela é folgada.
+banco fica conclusivo. O sandbox paga em ~8 minutos, então a janela é folgada.
+
+Uma consequência esperada não se confirmou: invoices vencidas deveriam acumular multa e
+juros ao serem pagas, mas o sandbox **não paga invoice vencida** — depois de `overdue` ela
+segue direto para `expired`. Nenhuma das 53 teve `fine_amount` ou `interest_amount`
+(ver Limitações).
 
 ### 6. Os eventos chegam fora de ordem
 
@@ -127,6 +136,95 @@ o mesmo estado final, e o Fallback consulta `credited_at IS NOT NULL`, nunca `st
 Consequência: `InvoiceStatus` **não tem `credited`**, porque isso é tipo de log e não
 status — no evento de crédito o próprio Stark reporta `invoice.status = 'paid'`.
 
+### 7. O webhook assina `invoice` **e** `transfer`
+
+Aceita pelo Stark não é dinheiro entregue. Uma Transfer nasce `created` e só depois vira
+`success` — ou `failed`. Aconteceu de verdade durante os testes:
+
+```
+23:05  Transfer requested
+23:05  Failed transfers: Duplicated transfer
+```
+
+Com a assinatura só de `invoice`, o banco registraria `created` e nunca saberia do
+desfecho. A conciliação `SUM(transfers) == SUM(credited)` fecharia **falsamente**, contando
+como transferido um valor que nunca saiu.
+
+**Decisão:** assinar `transfer` também, e refletir o desfecho na coluna `status`.
+
+| `log.type` | `transfers.status` | Significa |
+|---|---|---|
+| `created` | `created` | o Stark aceitou |
+| `sending` / `processing` | `processing` | está sendo enviada |
+| `success` | `success` | **dinheiro entregue** |
+| `failed` | `failed` | recusada; o dinheiro não saiu |
+| `canceled` | `canceled` | cancelada |
+
+Só `success` prova entrega. Por isso `TransferStatus` deixou de ter três estados e passou
+a espelhar o ciclo real.
+
+A busca por `external_id` ignora Transfers `failed` e `canceled`: o dinheiro não saiu, e
+considerá-las existentes faria o sistema registrar como entregue algo que foi recusado.
+
+**Uma Transfer `failed` não é repetida automaticamente.** Repetir exigiria saber por que
+foi recusada — no caso acima, uma nova tentativa com o mesmo `external_id` seria recusada
+igual. Ela fica registrada, aparece como diferença na conciliação e é sinalizada em nível
+`ERROR` no log, para revisão.
+
+O tratamento do evento **nunca cria nem repete transferência** — só atualiza status. A
+regra de que um único caminho gasta dinheiro continua valendo.
+
+## Limitações conhecidas
+
+O que está fora do escopo ou não pôde ser verificado, com o que foi observado no sandbox.
+
+### Invoice paga em atraso, com multa e juros
+
+`fine` e `interest` usam os padrões do Stark (2% e 1% ao mês), então uma invoice paga
+depois do vencimento seria creditada por mais que o valor emitido. O código trata isso —
+lê o `amount` do evento de crédito, nunca o valor emitido, e guarda os dois em colunas
+separadas.
+
+**Tentei exercitar o caminho forçando invoices a vencer, e o sandbox não as paga.** Dos
+logs reais:
+
+```
+53 invoices emitidas
+14 chegaram a ficar overdue
+ 0 foram pagas depois de vencer   →  10 expiraram, 4 seguem overdue
+ 0 tiveram fine_amount ou interest_amount
+```
+
+O simulador paga em ~8 minutos ou não paga mais. Uma vez `overdue`, a invoice segue até
+`expired` — não existe pagamento em atraso no sandbox.
+
+Ou seja, `credited_amount_cents` sempre igualou `nominal_amount_cents` nesta execução.
+A distinção entre as duas colunas é preparação para produção, não algo que os dados aqui
+comprovem.
+
+### Estorno de invoice já creditada
+
+O sandbox reverte invoices pagas. Observado duas vezes:
+
+```
+reversing → sending → sent → reversed → voided     (amount vai a 0)
+reversing → sending → sent → failed   → refunded   ('Receiver bank internal error')
+```
+
+**O sistema não trata isso.** Esses `log.type` caem no ramo de tipo desconhecido, o evento
+é registrado em `webhook_events` e o `credited_at` permanece. Se a Transfer já tiver saído,
+o dinheiro foi repassado a partir de um crédito que depois voltou.
+
+Tratar exigiria decidir o que fazer com um repasse já concluído — estornar não é operação
+do escopo do desafio. O que existe hoje é o registro: o evento fica salvo com o payload
+cru, então a inconsistência é detectável.
+
+### Tipos de log não mapeados
+
+Sete tipos ocorreram no sandbox e não têm tratamento: `sending`, `sent`, `reversing`,
+`reversed`, `refunded`, `failed` e `voided` — todos ligados aos dois fluxos acima. Eles
+não quebram nada (são ignorados com aviso no log), mas também não atualizam o `status`.
+
 ## Dev
 
 Todos os comandos rodam **da raiz do projeto** e usam `-m`. Executar o arquivo direto
@@ -137,7 +235,7 @@ raiz, e o `import app` falha.
 
 ```bash
 poetry install                               # dependências no .venv do projeto
-docker compose up -d                         # Postgres + Redpanda
+docker compose up -d                         # Postgres, Redpanda, console e o setup da fila
 .venv/bin/python -m scripts.create_tables    # cria as tabelas; idempotente
 ```
 
@@ -147,6 +245,9 @@ O `.env` precisa de `STARK_PROJECT_ID`, `STARK_PRIVATE_KEY_PATH`,
 ```bash
 .venv/bin/python -m scripts.generate_keys    # cole a pública no console do Stark
 ```
+
+O tópico da fila é criado pelo serviço `redpanda-init` do compose. Para rodar o mesmo
+setup fora do Docker: `.venv/bin/python -m scripts.create_topics`.
 
 ### Entrypoints
 
@@ -160,7 +261,7 @@ O `.env` precisa de `STARK_PROJECT_ID`, `STARK_PRIVATE_KEY_PATH`,
 # Worker Transfer — consome a fila e cria as Transfers, fica no ar
 .venv/bin/python -m app.entrypoints.worker
 
-# Fallback — reconciliação, roda e termina  (ainda não implementado)
+# Fallback — reconciliação, roda e termina
 .venv/bin/python -m app.entrypoints.reconciler
 ```
 
@@ -172,7 +273,8 @@ O Stark exige HTTPS e não alcança `localhost`. Em outro terminal:
 ngrok http 8000
 ```
 
-Cadastre no console do Stark a URL **com o path**, e subscription `invoice`:
+Cadastre no console do Stark a URL **com o path**, com as subscriptions `invoice` **e**
+`transfer` (ver decisão 7 — sem `transfer`, uma transferência recusada passa despercebida):
 
 ```
 https://<subdominio>.ngrok-free.app/webhooks/stark
@@ -186,6 +288,15 @@ curl -X POST https://<subdominio>.ngrok-free.app/webhooks/stark -d '{}'
 ```
 
 O inspetor em `http://localhost:4040` mostra cada entrega recebida, com body e headers.
+
+### Interfaces web
+
+| Endereço | O que é |
+|---|---|
+| `http://localhost:8080` | Redpanda Console — tópicos, mensagens e consumer groups |
+| `http://localhost:4040` | inspetor do ngrok — cada requisição recebida do Stark |
+| `http://localhost:8000/health` | a própria API |
+
 
 ### Depurar
 

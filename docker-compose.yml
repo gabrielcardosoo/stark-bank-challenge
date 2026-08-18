@@ -1,0 +1,88 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: stark-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: stark
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d stark"]
+      interval: 3s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+
+  redpanda:
+    image: redpandadata/redpanda:v24.3.5
+    container_name: stark-redpanda
+    restart: unless-stopped
+    command:
+      - redpanda
+      - start
+      # dev-container: um núcleo, sem reserva de memória, sem checagens de produção
+      - --mode=dev-container
+      - --smp=1
+      - --memory=512M
+      - --node-id=0
+      # dois listeners: 9092 para containers, 29092 para a máquina host
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:29092
+      - --advertise-kafka-addr=internal://redpanda:9092,external://localhost:29092
+    ports:
+      - "29092:29092"   # protocolo Kafka, a partir do host
+      - "9644:9644"     # admin API / métricas
+    volumes:
+      - redpanda_data:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -qE 'Healthy:.+true'"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  # setup da fila: roda, configura e termina. Os demais serviços esperam por ele.
+  redpanda-init:
+    image: redpandadata/redpanda:v24.3.5
+    container_name: stark-redpanda-init
+    restart: "no"
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    # item único de lista: como string, o compose quebraria em argumentos e o `sh -c`
+    # receberia só a primeira palavra
+    command:
+      - |
+        set -e
+        rpk topic create invoices.credited --partitions 1 --replicas 1 \
+          -X brokers=redpanda:9092 || echo "tópico já existe"
+        rpk cluster config set auto_create_topics_enabled=false \
+          -X admin.hosts=redpanda:9644
+        echo "setup da fila concluído"
+
+  # interface gráfica: tópicos, mensagens e consumer groups em http://localhost:8080
+  redpanda-console:
+    image: redpandadata/console:v2.8.2
+    container_name: stark-redpanda-console
+    restart: unless-stopped
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      redpanda-init:
+        condition: service_completed_successfully
+    ports:
+      - "8080:8080"
+    environment:
+      # dentro da rede do compose o broker é redpanda:9092, não localhost
+      KAFKA_BROKERS: redpanda:9092
+      KAFKA_ADMINAPI_ENABLED: "true"
+      KAFKA_ADMINAPI_URLS: http://redpanda:9644
+
+volumes:
+  postgres_data:
+  redpanda_data:
