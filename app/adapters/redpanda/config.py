@@ -20,3 +20,5 @@ class RedpandaConfig(BaseSettings):
     bootstrap_servers: str = "localhost:29092"
     topic: str = "invoices.credited"
     group_id: str = "worker-transfer"
+    # API de administração, usada só pelo script de setup
+    admin_url: str = "http://localhost:9644"

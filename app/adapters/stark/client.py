@@ -5,6 +5,10 @@ from app.adapters.stark.config import DestinationAccount, StarkConfig
 
 logger = logging.getLogger(__name__)
 
+# Status que provam que a Transfer está a caminho ou entregue. `failed` e
+# `canceled` ficam de fora: nesses casos o dinheiro não saiu.
+STATUS_TRANSFER_VALIDOS = {"created", "processing", "sending", "success"}
+
 
 class StarkClient:
     def __init__(self):
@@ -68,15 +72,26 @@ class StarkClient:
         return transfer
 
     def find_transfer_by_external_id(self, external_id: str):
-        """Devolve a Transfer criada com esse external_id, ou None se nunca saiu."""
-        found = starkbank.transfer.query(tags=[external_id], limit=1, user=self._project)
-        transfer = next(iter(found), None)
-        logger.debug(
-            "busca por external_id=%s: %s",
-            external_id,
-            f"encontrada (stark_id={transfer.id})" if transfer else "não existe no Stark",
-        )
-        return transfer
+        """Devolve a Transfer válida com esse external_id, ou None.
+
+        `failed` e `canceled` contam como inexistentes: o dinheiro não saiu, e tratá-las
+        como existentes faria o sistema registrar como entregue algo que foi recusado.
+
+        Sem `limit=1` de propósito — a primeira devolvida pode ser justamente uma
+        tentativa que falhou.
+        """
+        for transfer in starkbank.transfer.query(tags=[external_id], user=self._project):
+            if transfer.status in STATUS_TRANSFER_VALIDOS:
+                logger.debug(
+                    "busca por external_id=%s: encontrada (stark_id=%s, status=%s)",
+                    external_id,
+                    transfer.id,
+                    transfer.status,
+                )
+                return transfer
+
+        logger.debug("busca por external_id=%s: nenhuma válida no Stark", external_id)
+        return None
 
     # --- Events ---
     def undelivered_events(self):

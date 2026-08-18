@@ -11,7 +11,11 @@ from fastapi import FastAPI, Request, Response, status
 from starkbank.error import InvalidSignatureError
 
 from app.adapters.db.connector import session_scope
-from app.adapters.db.repositories import InvoiceRepository, WebhookEventRepository
+from app.adapters.db.repositories import (
+    InvoiceRepository,
+    TransferRepository,
+    WebhookEventRepository,
+)
 from app.adapters.redpanda import CreditedInvoiceProducer
 from app.adapters.stark import StarkClient, StarkSignatureVerifier
 from app.logger import Logger
@@ -62,6 +66,7 @@ async def receive_webhook(request: Request) -> Response:
             processado = ReceiveEvent(
                 events=WebhookEventRepository(session),
                 invoices=InvoiceRepository(session),
+                transfers=TransferRepository(session),
                 producer=request.app.state.producer,
             ).execute(event, payload)
 

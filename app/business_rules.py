@@ -28,8 +28,13 @@ def transfer_external_id(invoice_id: str) -> str:
 
     Se este valor variar entre chamadas, toda a proteção contra pagamento em dobro
     deixa de existir.
+
+    O prefixo NÃO pode ser `invoice-`: o Stark já usa `invoice-{id}` internamente para
+    o lançamento do crédito, e uma Transfer com esse mesmo external_id é recusada com
+    "Duplicated transfer". Verificado — `invoice-{id}` falha, `transfer-{id}` com o
+    mesmo valor e destino tem sucesso.
     """
-    return f"invoice-{invoice_id}"
+    return f"transfer-{invoice_id}"
 
 
 class PeopleGenerator:
@@ -42,8 +47,9 @@ class PeopleGenerator:
         self,
         minimo: int = MIN_INVOICES_POR_LOTE,
         maximo: int = MAX_INVOICES_POR_LOTE,
-        min_amount_cents: int = 1_000,
-        max_amount_cents: int = 500_000,
+        min_amount_cents: int = 1_000, #10 reais
+        max_amount_cents: int = 100_000, #1 mil reais
+
     ):
         self._minimo = minimo
         self._maximo = maximo
