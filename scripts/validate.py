@@ -48,12 +48,9 @@ with session_scope() as s:
     total, = q("SELECT count(*) FROM invoices")[0]
     por_status = q("SELECT status, count(*) FROM invoices GROUP BY status ORDER BY 2 DESC")
     print(f"    {total} invoices emitidas: " + ", ".join(f"{n} {st}" for st, n in por_status))
-    lotes = q("""SELECT count(*) FROM (
-                   SELECT date_trunc('hour', created_at) FROM invoices
-                   GROUP BY 1) x""")[0][0]
-    print(f"    distribuídas em {lotes} lotes")
+
     checar(total > 0, "houve emissão")
-    relatorio["emissao"] = {"total_invoices": total, "lotes": lotes,
+    relatorio["emissao"] = {"total_invoices": total,
                             "por_status": {st: n for st, n in por_status}}
 
     secao("2. Todo crédito virou Transfer")

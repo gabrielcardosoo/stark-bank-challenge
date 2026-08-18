@@ -225,6 +225,76 @@ Sete tipos ocorreram no sandbox e não têm tratamento: `sending`, `sent`, `reve
 `reversed`, `refunded`, `failed` e `voided` — todos ligados aos dois fluxos acima. Eles
 não quebram nada (são ignorados com aviso no log), mas também não atualizam o `status`.
 
+## Testes
+
+```bash
+.venv/bin/python -m pytest tests/unit -q
+```
+
+**76 testes, ~0,6 segundo.** Rodam com Postgres e Redpanda desligados: os repositórios,
+o client do Stark e o producer são fakes em memória, definidos em
+[tests/unit/conftest.py](tests/unit/conftest.py). Nenhum teste toca banco, rede ou
+relógio real.
+
+| Arquivo | Testes | Cobre |
+|---|---|---|
+| [test_signature.py](tests/unit/test_signature.py) | 6 | validação da assinatura |
+| [test_api.py](tests/unit/test_api.py) | 8 | borda HTTP: 400 vs 500 vs 200 |
+| [test_receive_event.py](tests/unit/test_receive_event.py) | 17 | dedupe e roteamento de eventos |
+| [test_process_credited.py](tests/unit/test_process_credited.py) | 10 | idempotência e cálculo do repasse |
+| [test_business_rules.py](tests/unit/test_business_rules.py) | 13 | funções puras e gerador de CPF |
+| [test_issue_invoices.py](tests/unit/test_issue_invoices.py) | 8 | emissão em lote |
+| [test_reconcile.py](tests/unit/test_reconcile.py) | 12 | Fallback (casos A, B1 e B2) |
+
+O plano completo está em [testes.md](testes.md).
+
+### Os testes que sustentam as decisões
+
+Cada decisão de projeto tem um teste que a torna executável — se alguém desfizer a
+decisão, o teste quebra:
+
+- **`test_payload_adulterado_e_rejeitado`** — a mesma assinatura com conteúdo diferente
+  falha. Prova que a assinatura é *verificada*, não só lida.
+- **`test_body_cru_chega_intacto_ao_verifier`** — usa um JSON com espaçamento irregular e
+  assere que o que chega ao verifier difere do JSON re-serializado. Pega a armadilha do
+  `request.json()`.
+- **`test_commit_acontece_antes_da_chamada_ao_stark`** — assere a ordem exata
+  `["commit", "stark", "commit"]`. Remover o primeiro commit reabre o furo em que um erro
+  ao confirmar apagaria a linha `pending`.
+- **`test_ordem_de_chegada_nao_muda_o_estado_final`** — processa `credited→paid` e
+  `paid→credited` e exige estado idêntico (decisão 6).
+- **`test_external_id_nao_usa_o_prefixo_invoice`** — trava a regressão que fez 5
+  transferências falharem como *Duplicated transfer* (decisão 2).
+- **`test_default_due_nao_vence_imediatamente`** — pega um `due` curto demais, que faria
+  o sandbox nunca pagar nenhuma invoice.
+- **`test_carencia_protege_trabalho_em_andamento`** — uma linha `pending` recém-criada
+  não é tratada como órfã pelo Fallback.
+
+## Validação da execução
+
+O [scripts/validate.py](scripts/validate.py) confronta **três fontes independentes** — as
+tabelas, os eventos recebidos e a API do Stark — e sai com código 1 se alguma discordar.
+
+```bash
+.venv/bin/python -m scripts.validate                     # relatório no terminal
+.venv/bin/python -m scripts.validate --json saida.json   # e os dados brutos
+```
+
+Resultado da execução de 6 horas:
+
+```
+69 invoices em 7 lotes
+54 creditadas  →  54 Transfers  →  54 success
+
+líquido creditado:  R$ 29.031,13
+total transferido:  R$ 29.031,13     diferença: 0
+```
+
+As 13 verificações passaram: nenhum crédito sem Transfer, nenhuma invoice com duas
+Transfers, nenhum `external_id` repetido, nenhuma Transfer presa em `pending` ou recusada,
+todos os eventos processados e sem duplicatas, e cada `credited` com seu
+`transfer success` correspondente.
+
 ## Dev
 
 Todos os comandos rodam **da raiz do projeto** e usam `-m`. Executar o arquivo direto
@@ -246,8 +316,7 @@ O `.env` precisa de `STARK_PROJECT_ID`, `STARK_PRIVATE_KEY_PATH`,
 .venv/bin/python -m scripts.generate_keys    # cole a pública no console do Stark
 ```
 
-O tópico da fila é criado pelo serviço `redpanda-init` do compose. Para rodar o mesmo
-setup fora do Docker: `.venv/bin/python -m scripts.create_topics`.
+O tópico da fila é criado pelo serviço `redpanda-init` do compose.
 
 ### Entrypoints
 
@@ -317,5 +386,4 @@ docker compose down -v && docker compose up -d
 
 - [arquiteture.md](arquiteture.md) — componentes e fluxo
 - [testes.md](testes.md) — testes unitários obrigatórios
-- [todos.md](todos.md) — checklist de implementação
 - [knowledge.md](knowledge.md) — aprendizados
