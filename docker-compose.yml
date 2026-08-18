@@ -83,6 +83,106 @@ services:
       KAFKA_ADMINAPI_ENABLED: "true"
       KAFKA_ADMINAPI_URLS: http://redpanda:9644
 
+  # --- aplicação -------------------------------------------------------------------
+
+  # cria as tabelas e termina; os demais esperam por ele
+  db-init:
+    build: .
+    container_name: stark-db-init
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file: .env
+    environment: &app_env
+      # dentro do compose os endereços mudam: nomes de serviço, não localhost
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/stark
+      REDPANDA_BOOTSTRAP_SERVERS: redpanda:9092
+    volumes:
+      - ./stark-keys:/app/stark-keys:ro
+    command: python -m scripts.create_tables
+
+  api:
+    build: .
+    container_name: stark-api
+    restart: unless-stopped
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+      redpanda-init:
+        condition: service_completed_successfully
+    env_file: .env
+    environment: *app_env
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./stark-keys:/app/stark-keys:ro
+      - ./logs:/app/logs
+    command: uvicorn app.entrypoints.api:app --host 0.0.0.0 --port 8000
+
+  worker:
+    build: .
+    container_name: stark-worker
+    restart: unless-stopped
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+      redpanda-init:
+        condition: service_completed_successfully
+    env_file: .env
+    environment: *app_env
+    volumes:
+      - ./stark-keys:/app/stark-keys:ro
+      - ./logs:/app/logs
+    command: python -m app.entrypoints.worker
+
+  # emite um lote e dorme. Sem cron: o laço no shell basta e mantém o entrypoint burro.
+  issuer:
+    build: .
+    container_name: stark-issuer
+    restart: unless-stopped
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+    env_file: .env
+    environment:
+      <<: *app_env
+      INTERVALO_SEGUNDOS: "3600"
+    volumes:
+      - ./stark-keys:/app/stark-keys:ro
+      - ./logs:/app/logs
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        while true; do
+          python -m app.entrypoints.issuer || echo "lote falhou; segue para o próximo"
+          sleep "$$INTERVALO_SEGUNDOS"
+        done
+
+  reconciler:
+    build: .
+    container_name: stark-reconciler
+    restart: unless-stopped
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+      redpanda-init:
+        condition: service_completed_successfully
+    env_file: .env
+    environment:
+      <<: *app_env
+      INTERVALO_SEGUNDOS: "1800"
+    volumes:
+      - ./stark-keys:/app/stark-keys:ro
+      - ./logs:/app/logs
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        while true; do
+          sleep "$$INTERVALO_SEGUNDOS"
+          python -m app.entrypoints.reconciler || echo "reconciliação falhou; segue"
+        done
+
 volumes:
   postgres_data:
   redpanda_data:
